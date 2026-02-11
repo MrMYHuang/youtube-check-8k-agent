@@ -34,13 +34,13 @@ python run.py
 ## Manual trigger
 
 ```bash
-curl -X POST http://localhost:8000/run
+curl -X POST http://localhost:8111/run
 ```
 
 ## Health
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8111/health
 ```
 
 ## Notes
