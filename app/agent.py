@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from langchain_community.tools import StructuredTool
 from langchain_ollama import ChatOllama
-from langchain.agents import create_agent
+from langgraph.prebuilt import create_react_agent
 
 from .browser_task import run_check_8k
 from .config import settings
@@ -17,44 +17,43 @@ async def _run_check_tool() -> str:
     return json.dumps(result)
 
 
-def _build_agent() -> Any:
+def _build_agent():
     llm = ChatOllama(base_url=settings.ollama_base_url, model=settings.ollama_model)
     tool = StructuredTool.from_function(
         coroutine=_run_check_tool,
         name="check_youtube_8k",
         description=(
-            "Runs the YouTube Studio workflow to find the first private video, "
-            "open it on YouTube, and detect whether 8K (4320p) is available. "
-            "Returns JSON with video_title, video_url, has_8k, status, error."
+            "Runs the YouTube Studio workflow to find all private videos from "
+            "the last 2 months, open each on YouTube, and detect whether 8K "
+            "(4320p) is available. Returns JSON with a videos list and status."
         ),
     )
 
-    agent = create_agent(llm, tools=[tool])
-    return agent
+    return create_react_agent(
+        llm,
+        [tool],
+        prompt="You are a helpful assistant that checks YouTube videos for 8K availability.",
+    )
 
 
 async def run_agent() -> Dict[str, Any]:
     agent = _build_agent()
     try:
-        output = await agent.ainvoke(
-            {"input": "Check the first private video for 8K availability."}
+        result = await agent.ainvoke(
+            {"messages": [("human", "Check all private videos from the last 2 months for 8K availability.")]}
         )
 
-        if "messages" not in output:
-            raise RuntimeError("Agent did not return messages")
+        # Extract the last AI message content
+        messages = result.get("messages", [])
+        for msg in reversed(messages):
+            if hasattr(msg, "content") and isinstance(msg.content, str):
+                try:
+                    return json.loads(msg.content)
+                except json.JSONDecodeError:
+                    continue
 
-        last_msg = output["messages"][-1]
-        try:
-            if hasattr(last_msg, "content"):
-                content = last_msg.content
-                if isinstance(content, str):
-                    return json.loads(content)
-            raise RuntimeError("Invalid response format")
-        except json.JSONDecodeError as exc:
-            logger.exception("Failed to parse agent output: %s", last_msg)
-            raise RuntimeError("Invalid agent output") from exc
+        logger.warning("Agent returned non-JSON output, running tool directly")
+        return await run_check_8k()
     except Exception as exc:  # noqa: BLE001
-        # Ollama sometimes returns an empty stream while loading a model.
-        # Fallback to direct task execution to keep the service reliable.
         logger.warning("Agent failed, running tool directly: %s", exc)
         return await run_check_8k()

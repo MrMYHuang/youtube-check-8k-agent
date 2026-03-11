@@ -13,10 +13,22 @@ def _format_message(result: Dict[str, Any]) -> str:
     if status != "ok":
         return f"YouTube 8K Check\nStatus: {status}\nError: {result.get('error')}\n"
 
-    has_8k = "YES" if result.get("has_8k") else "NO"
-    title = result.get("video_title") or "(unknown)"
-    url = result.get("video_url") or "(unknown)"
-    return f"YouTube 8K Check\nTitle: {title}\nURL: {url}\n8K: {has_8k}\n"
+    videos = result.get("videos", [])
+    if not videos:
+        return "YouTube 8K Check\nNo private videos found in recent 2 months.\n"
+
+    lines = [f"YouTube 8K Check ({len(videos)} video{'s' if len(videos) != 1 else ''})"]
+    for i, v in enumerate(videos, 1):
+        has_8k = "YES ✅" if v.get("has_8k") else "NO ❌"
+        url = v.get("url", "(unknown)")
+        title = v.get("title", "(unknown)")
+        error = v.get("error")
+        line = f"\n{i}. {title}\n   URL: {url}\n   8K: {has_8k}"
+        if error:
+            line += f"\n   Error: {error}"
+        lines.append(line)
+
+    return "\n".join(lines) + "\n"
 
 
 async def send_telegram_message_async(result: Dict[str, Any]) -> None:
