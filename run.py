@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-YouTube 8K Agent - AI Agent that checks YouTube video quality using LangChain
+YouTube 8K Agent - service that checks YouTube video quality with Playwright
 
-This agent:
+This service:
 1. Runs daily at 6:30 AM (configurable)
 2. Opens YouTube Studio and finds all private videos from the last 2 months
 3. Opens each on YouTube and checks for 8K resolution availability

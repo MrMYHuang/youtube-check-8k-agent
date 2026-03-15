@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import (
+    Page,
     async_playwright,
     TimeoutError as PlaywrightTimeoutError,
 )
@@ -18,6 +19,10 @@ _MONTH_ABBR = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
+
+_VIDEOS_PAGE_SUFFIX = "/videos"
+
+_UNSUPPORTED_BROWSER_TEXT = "unsupported browser"
 
 
 def _parse_upload_date(text: str) -> Optional[datetime]:
@@ -62,21 +67,87 @@ def _extract_video_id(href: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-async def _ensure_videos_page(page, studio_url: str) -> None:
-    await page.goto(studio_url, wait_until="networkidle")
-    if "/videos" not in page.url:
-        await page.goto(studio_url.rstrip("/") + "/videos", wait_until="networkidle")
+def _videos_page_url(studio_url: str) -> str:
+    base_url = studio_url.rstrip("/")
+    if base_url.endswith(_VIDEOS_PAGE_SUFFIX):
+        return base_url
+    return f"{base_url}{_VIDEOS_PAGE_SUFFIX}"
+
+
+async def _goto_with_retries(page: Page, url: str, attempts: int = 2) -> None:
+    last_error: Optional[PlaywrightTimeoutError] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await page.wait_for_load_state("load")
+            return
+        except PlaywrightTimeoutError as exc:
+            last_error = exc
+            logger.warning(
+                "Navigation attempt %s/%s timed out for %s: %s",
+                attempt,
+                attempts,
+                url,
+                exc,
+            )
+            if attempt == attempts:
+                raise
+            await page.wait_for_timeout(1500)
+
+    if last_error is not None:
+        raise last_error
+
+
+async def _wait_for_studio_rows(page: Page) -> None:
+    rows_locator = page.locator("ytcp-video-row")
+    unsupported_locator = page.locator(f"text={_UNSUPPORTED_BROWSER_TEXT}")
+    sign_in_locator = page.locator("text=Sign in")
+
+    deadline = asyncio.get_running_loop().time() + (
+        settings.browser_action_timeout_ms / 1000
+    )
+    while asyncio.get_running_loop().time() < deadline:
+        if await rows_locator.count() > 0:
+            return
+
+        if await unsupported_locator.count() > 0:
+            raise RuntimeError(
+                "YouTube Studio returned an unsupported browser page. "
+                "Check the browser user agent or use a Chrome-based channel."
+            )
+
+        if await sign_in_locator.count() > 0:
+            raise RuntimeError(
+                "YouTube Studio redirected to sign-in. Refresh the saved session "
+                "with HEADLESS=false and log in again."
+            )
+
+        await page.wait_for_timeout(500)
+
+    raise PlaywrightTimeoutError(
+        "Timed out waiting for YouTube Studio video rows to load"
+    )
+
+
+async def _ensure_videos_page(page: Page, studio_url: str) -> None:
+    target_url = _videos_page_url(studio_url)
+    await _goto_with_retries(page, target_url)
+
+    if _VIDEOS_PAGE_SUFFIX not in page.url:
+        await _goto_with_retries(page, target_url)
+
+    await _wait_for_studio_rows(page)
 
 
 async def _collect_private_videos(
-    page, cutoff: datetime
+    page: Page, cutoff: datetime
 ) -> List[Dict[str, Any]]:
     """Scroll through the video list and collect private videos within the cutoff."""
     videos: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
 
+    await _wait_for_studio_rows(page)
     rows_locator = page.locator("ytcp-video-row")
-    await rows_locator.first.wait_for(timeout=30_000)
 
     max_scrolls = 50
     for _ in range(max_scrolls):
@@ -123,24 +194,26 @@ async def _collect_private_videos(
     return videos
 
 
-async def _check_8k_in_player(page) -> bool:
-    await page.wait_for_selector("#movie_player", timeout=30_000)
+async def _check_8k_in_player(page: Page) -> bool:
+    await page.wait_for_selector(
+        "#movie_player", timeout=settings.browser_action_timeout_ms
+    )
+    await page.hover("#movie_player", timeout=10_000)
     await page.click("#movie_player", timeout=10_000)
     settings_btn = page.locator("button.ytp-settings-button")
-    await settings_btn.wait_for(timeout=10_000)
-    await settings_btn.click(force=True)
+    await settings_btn.wait_for(state="attached", timeout=10_000)
+    await settings_btn.evaluate("button => button.click()")
     await page.wait_for_selector(".ytp-panel-menu", timeout=10_000)
     quality_item = (
         page.locator(".ytp-panel-menu .ytp-menuitem").filter(has_text="Quality").first
     )
-    await quality_item.click()
+    await quality_item.evaluate("item => item.click()")
     await page.wait_for_selector(".ytp-panel-menu", timeout=10_000)
 
     items = page.locator(".ytp-panel-menu .ytp-menuitem")
-    count = await items.count()
-    for i in range(count):
-        text = (await items.nth(i).inner_text()).strip()
-        if "4320p" in text or "8K" in text or "8k" in text:
+    for text in await items.all_inner_texts():
+        normalized_text = text.strip()
+        if "4320" in normalized_text or "8K" in normalized_text or "8k" in normalized_text:
             return True
     return False
 
@@ -155,8 +228,11 @@ async def run_check_8k() -> Dict[str, Any]:
             user_data_dir=settings.user_data_dir,
             headless=settings.headless,
             slow_mo=settings.slow_mo_ms,
+            user_agent=settings.browser_user_agent,
             args=["--disable-blink-features=AutomationControlled"],
         )
+        context.set_default_timeout(settings.browser_action_timeout_ms)
+        context.set_default_navigation_timeout(settings.browser_navigation_timeout_ms)
         page = await context.new_page()
 
         try:
@@ -177,9 +253,7 @@ async def run_check_8k() -> Dict[str, Any]:
                 watch_page = None
                 try:
                     watch_page = await context.new_page()
-                    await watch_page.goto(
-                        video_info["url"], wait_until="networkidle"
-                    )
+                    await _goto_with_retries(watch_page, video_info["url"])
                     entry["has_8k"] = await _check_8k_in_player(watch_page)
                 except PlaywrightTimeoutError as exc:
                     entry["error"] = str(exc)

@@ -45,4 +45,8 @@ curl http://localhost:8111/health
 
 ## Notes
 
-- The selector logic is tuned for YouTube Studio’s current UI. If the page layout changes, update selectors in `app/browser_task.py`.- Videos older than 2 months are skipped; the agent scrolls through YouTube Studio's video list until it passes the cutoff date.- The task uses a LangChain agent with an Ollama-backed local LLM to orchestrate tool execution.
+- The selector logic is tuned for YouTube Studio's current UI. If the page layout changes, update selectors in `app/browser_task.py`.
+- Videos older than 2 months are skipped; the agent scrolls through YouTube Studio's video list until it passes the cutoff date.
+- The service runs `run_check_8k()` directly.
+- Headless mode uses a regular Chrome user agent by default because YouTube Studio may block Playwright's default `HeadlessChrome` identity with an unsupported-browser page.
+- If YouTube Studio is slow to load, adjust `BROWSER_NAVIGATION_TIMEOUT_MS` and `BROWSER_ACTION_TIMEOUT_MS` in `.env`.
